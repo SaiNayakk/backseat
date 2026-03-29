@@ -1,0 +1,26 @@
+{
+  "name": "backseat",
+  "version": "0.1.0",
+  "description": "Your phone does the work. You take the backseat.",
+  "keywords": ["deploy", "android", "termux", "ssh", "cli", "devtools"],
+  "homepage": "https://github.com/your-username/backseat",
+  "bugs": "https://github.com/your-username/backseat/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/backseat.git",
+    "directory": "npm"
+  },
+  "license": "MIT",
+  "bin": {
+    "backseat": "bin/backseat.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/backseat.js --version || true"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "files": [
+    "bin/"
+  ]
+}
