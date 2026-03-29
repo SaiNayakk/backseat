@@ -6,6 +6,7 @@ const { spawnSync } = require("child_process");
 const { platform } = require("process");
 
 const PYPI_PACKAGE = "backseat";
+const PYPI_INSTALL = "backseat[deploy]";
 const MIN_PYTHON_VERSION = [3, 10];
 
 // ── Find Python ───────────────────────────────────────────────────────────────
@@ -53,16 +54,16 @@ function isInstalled(python) {
 // ── Install backseat via pip ──────────────────────────────────────────────────
 
 function install(python) {
-  console.log(`Installing ${PYPI_PACKAGE} via pip...`);
+  console.log(`Installing ${PYPI_INSTALL} via pip...`);
   const result = spawnSync(
     python,
-    ["-m", "pip", "install", "--quiet", PYPI_PACKAGE],
+    ["-m", "pip", "install", "--quiet", PYPI_INSTALL],
     { stdio: "inherit" }
   );
 
   if (result.error || result.status !== 0) {
-    console.error(`\nFailed to install ${PYPI_PACKAGE}.`);
-    console.error(`Try manually: pip install ${PYPI_PACKAGE}`);
+    console.error(`\nFailed to install ${PYPI_INSTALL}.`);
+    console.error(`Try manually: pip install "${PYPI_INSTALL}"`);
     process.exit(1);
   }
 }

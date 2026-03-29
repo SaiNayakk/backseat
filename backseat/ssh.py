@@ -8,7 +8,13 @@ import socket
 from pathlib import Path
 from typing import Optional
 
-import paramiko
+try:
+    import paramiko
+except ImportError:
+    raise ImportError(
+        "SSH deploy requires paramiko. "
+        "Install it with: pip install \"backseat[deploy]\""
+    ) from None
 
 from backseat.config import PhoneConnection, BackseatError
 

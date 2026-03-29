@@ -55,7 +55,7 @@ Pick whichever package manager you already have:
 npm install -g backseat
 
 # pip
-pip install backseat
+pip install "backseat[deploy]"
 ```
 
 ### Phone — one command in Termux
