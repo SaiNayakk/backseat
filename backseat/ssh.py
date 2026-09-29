@@ -57,7 +57,7 @@ class SSHClient:
             client.connect(**kwargs)
         except paramiko.AuthenticationException:
             raise BackseatError("SSH authentication failed. Check your credentials.")
-        except paramiko.NoValidConnectionsError:
+        except paramiko.ssh_exception.NoValidConnectionsError:
             raise BackseatError(
                 f"Cannot connect to {self.connection.ip}:{self.connection.ssh_port}. "
                 "Is the phone on the same network and is sshd running?\n"
@@ -103,12 +103,13 @@ class SSHClient:
         uploaded: list[str] = []
 
         try:
+            resolved_remote = _resolve_remote_path(sftp, remote, local)
             if local.is_file():
-                _ensure_remote_dir(sftp, os.path.dirname(remote))
-                sftp.put(str(local), remote)
-                uploaded.append(remote)
+                _ensure_remote_dir(sftp, os.path.dirname(resolved_remote))
+                sftp.put(str(local), resolved_remote)
+                uploaded.append(resolved_remote)
             elif local.is_dir():
-                uploaded.extend(_upload_dir(sftp, local, remote))
+                uploaded.extend(_upload_dir(sftp, local, resolved_remote))
             else:
                 raise BackseatError(f"Local path not found: {local}")
         finally:
@@ -131,6 +132,28 @@ class SSHClient:
 
 # ── SFTP helpers ───────────────────────────────────────────────────────────────
 
+def _resolve_remote_path(sftp: paramiko.SFTPClient, remote: str, local: Path) -> str:
+    """Resolve ~, ~/, and directory targets to full remote paths."""
+    if remote == "~" or remote == "~/":
+        remote = sftp.normalize(".")
+    elif remote.startswith("~/"):
+        home = sftp.normalize(".")
+        remote = f"{home}/{remote[2:]}"
+
+    if local.is_file():
+        is_dir = remote.endswith("/")
+        if not is_dir:
+            try:
+                import stat
+                is_dir = stat.S_ISDIR(sftp.stat(remote).st_mode)
+            except (IOError, OSError):
+                is_dir = False
+        if is_dir:
+            remote = f"{remote.rstrip('/')}/{local.name}"
+
+    return remote
+
+
 def _ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
     """Create remote directory tree if it doesn't exist."""
     if not remote_dir or remote_dir == "/":
@@ -146,8 +169,11 @@ def _ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
             continue
         try:
             sftp.stat(current)
-        except FileNotFoundError:
-            sftp.mkdir(current)
+        except (IOError, OSError):
+            try:
+                sftp.mkdir(current)
+            except (IOError, OSError):
+                pass
 
 
 def _upload_dir(sftp: paramiko.SFTPClient, local_dir: Path, remote_dir: str) -> list[str]:

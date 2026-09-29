@@ -20,6 +20,7 @@ class PhoneConnection(BaseModel):
     auth_method: str
     key_path: Optional[str] = None
     agent_token: Optional[str] = None
+    remote_url: Optional[str] = None  # cloudflared quick-tunnel URL for the agent, when LAN isn't reachable
 
     @field_validator("ip")
     @classmethod

@@ -17,7 +17,7 @@ from rich.table import Table
 from rich.text import Text
 
 from backseat.config import PhoneConnection, BackseatError
-from backseat.health import HealthSnapshot, TunnelStatus, get_health, get_tunnel_status
+from backseat.health import AppInfo, HealthSnapshot, TunnelStatus, get_health, get_tunnel_status, list_apps
 
 console = Console()
 
@@ -87,19 +87,66 @@ def _process_table(snap: HealthSnapshot) -> Panel:
     return Panel(table, title="[bold #7c6af7]Processes[/]", border_style="#2a2a2a")
 
 
+_APP_STATUS_STYLE = {"running": "green", "crashed": "red", "stopped": "dim"}
+
+
+def _apps_panel(apps: Optional[list[AppInfo]]) -> Panel:
+    if not apps:
+        text = Text("No managed apps.", style="dim")
+        text.append("\n\nDeploy one with: ", style="dim")
+        text.append("backseat deploy <local> <remote> --start \"<cmd>\"", style="bold white")
+        return Panel(text, title="[bold #7c6af7]Apps[/]", border_style="#2a2a2a")
+
+    table = Table(show_header=True, header_style="bold #888888", box=None, padding=(0, 1))
+    table.add_column("Name", style="white", no_wrap=True)
+    table.add_column("Status")
+    table.add_column("Uptime", justify="right")
+    table.add_column("Restarts", justify="right", style="dim")
+
+    for a in apps:
+        style = _APP_STATUS_STYLE.get(a.status, "white")
+        table.add_row(
+            a.name,
+            f"[{style}]{a.status}[/{style}]",
+            fmt_uptime(a.uptime_seconds) if a.uptime_seconds is not None else "—",
+            str(a.restart_count),
+        )
+
+    return Panel(table, title="[bold #7c6af7]Apps[/]", border_style="#2a2a2a")
+
+
 def _tunnel_panel(tunnel: Optional[TunnelStatus]) -> Panel:
     if tunnel is None or not tunnel.active:
         text = Text("○  No active tunnel", style="dim")
         text.append("\n\nStart one with: ", style="dim")
         text.append("backseat tunnel start <port>", style="bold white")
-    else:
-        text = Text("● Active", style="bold green")
-        text.append(f"  →  port {tunnel.port}\n\n", style="white")
-        if tunnel.url:
-            text.append(tunnel.url, style="bold #7c6af7 underline")
-        else:
-            text.append("Waiting for URL...", style="dim")
+        return Panel(text, title="[bold #7c6af7]Cloudflare Tunnel[/]", border_style="#2a2a2a")
 
+    if tunnel.mode == "named":
+        if not tunnel.routes:
+            text = Text("● Active", style="bold green")
+            text.append("  (named tunnel, no hostnames configured)", style="dim")
+            return Panel(text, title="[bold #7c6af7]Cloudflare Tunnel[/]", border_style="#2a2a2a")
+
+        table = Table(show_header=True, header_style="bold #888888", box=None, padding=(0, 1))
+        table.add_column("", width=1)
+        table.add_column("Hostname", style="white", no_wrap=True)
+        table.add_column("Port", justify="right", style="dim")
+        for route in tunnel.routes:
+            dot_style = "bold green" if route.live else "dim red"
+            table.add_row(
+                f"[{dot_style}]●[/{dot_style}]",
+                route.hostname if route.live else f"[dim]{route.hostname}[/dim]",
+                str(route.port) if route.port else "—",
+            )
+        return Panel(table, title="[bold #7c6af7]Cloudflare Tunnel[/]", border_style="#2a2a2a")
+
+    text = Text("● Active", style="bold green")
+    text.append(f"  →  port {tunnel.port}\n\n", style="white")
+    if tunnel.url:
+        text.append(tunnel.url, style="bold #7c6af7 underline")
+    else:
+        text.append("Waiting for URL...", style="dim")
     return Panel(text, title="[bold #7c6af7]Cloudflare Tunnel[/]", border_style="#2a2a2a")
 
 
@@ -128,6 +175,7 @@ def run_dashboard(conn: PhoneConnection) -> None:
     """Entry point — start the live dashboard. Exits cleanly on Ctrl+C."""
     last_snap: Optional[HealthSnapshot] = None
     last_tunnel: Optional[TunnelStatus] = None
+    last_apps: Optional[list[AppInfo]] = None
     last_updated = "—"
     last_error: Optional[str] = None
 
@@ -144,20 +192,26 @@ def run_dashboard(conn: PhoneConnection) -> None:
         )
         layout["left"].split_column(
             Layout(name="stats"),
-            Layout(name="tunnel", size=6),
+            Layout(name="tunnel", size=11),
+        )
+        layout["right"].split_column(
+            Layout(name="processes"),
+            Layout(name="apps", size=8),
         )
 
         if last_snap:
             layout["header"].update(_header(conn, last_updated, last_error))
             layout["stats"].update(_stat_panel(last_snap))
-            layout["right"].update(_process_table(last_snap))
+            layout["processes"].update(_process_table(last_snap))
             layout["tunnel"].update(_tunnel_panel(last_tunnel))
+            layout["apps"].update(_apps_panel(last_apps))
         else:
             msg = last_error or "Connecting..."
             layout["header"].update(Panel(f"[dim]{msg}[/]"))
             layout["stats"].update(Panel(""))
-            layout["right"].update(Panel(""))
+            layout["processes"].update(Panel(""))
             layout["tunnel"].update(Panel(""))
+            layout["apps"].update(Panel(""))
 
         layout["footer"].update(
             Text("  [dim]Ctrl+C[/dim] to exit", justify="left")
@@ -170,6 +224,7 @@ def run_dashboard(conn: PhoneConnection) -> None:
                 try:
                     last_snap = get_health(conn)
                     last_tunnel = get_tunnel_status(conn)
+                    last_apps = list_apps(conn)
                     last_updated = datetime.now().strftime("%H:%M:%S")
                     last_error = None
                 except BackseatError as e:
