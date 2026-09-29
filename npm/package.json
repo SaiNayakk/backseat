@@ -1,7 +1,7 @@
 {
   "name": "backseat",
-  "version": "0.1.1",
-  "description": "Your phone does the work. You take the backseat.",
+  "version": "0.2.1",
+  "description": "Your phone does the work. You take the backseat.\nTurns an Android phone running Termux into a personal deploy server: pair your laptop with a QR code, deploy files or whole projects over SSH, run them as managed apps that auto-restart on crash and survive reboots, monitor CPU/RAM/storage/uptime from a live terminal or web dashboard, and expose local ports to the internet via Cloudflare tunnels — no VPS or monthly hosting bill.",
   "keywords": [
     "deploy",
     "android",

@@ -9,3 +9,6 @@ venv/
 *.tmp
 .backseat/
 npm/node_modules/
+
+# local-only
+brag-output/

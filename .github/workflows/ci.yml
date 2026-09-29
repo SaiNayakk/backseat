@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[agent,cli]"
+      - name: Compile
+        # every module, including the CLI
+        run: python -m compileall -q backseat
+      - name: Agent boots and serves the public endpoints
+        run: |
+          python - <<'PY'
+          from backseat import agent
+          c = agent.app.test_client()
+          r = c.get("/public/status"); assert r.status_code == 200, r.status_code
+          body = r.get_json()
+          assert "apps" in body and "cpu_percent" in body
+          # Never leak control details on the public endpoint.
+          for a in body["apps"]:
+              assert set(a) <= {"name", "status", "restart_count", "uptime_seconds"}, a
+          assert c.get("/apps").status_code in (401, 403)
+          print("ok")
+          PY
