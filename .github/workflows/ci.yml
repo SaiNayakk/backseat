@@ -14,8 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e .
+      - run: pip install -e ".[agent,cli]"
       - name: Compile
+        # every module, including the CLI
         run: python -m compileall -q backseat
       - name: Agent boots and serves the public endpoints
         run: |
