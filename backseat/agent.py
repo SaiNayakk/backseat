@@ -29,7 +29,7 @@ from typing import Optional
 
 import psutil
 import qrcode
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, jsonify, redirect, request, stream_with_context
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -75,6 +75,10 @@ AGENT_PORT = 8080  # overwritten in main() from BACKSEAT_PORT
 AGENT_HOME = Path.home() / ".backseat" / "agent"
 LOGS_DIR = AGENT_HOME / "logs"
 APPS_FILE = AGENT_HOME / "apps.json"
+# pid + process start time of each running app, so an agent restart re-adopts
+# exactly the right process instead of guessing (not meaningful across reboots).
+RUNTIME_FILE = AGENT_HOME / "runtime.json"
+SHELL_NAMES = {"sh", "bash", "zsh", "fish", "dash", "login", "sshd", "ssh", "sshd-session"}
 TOKEN_FILE = AGENT_HOME / "token.json"
 REMOTE_FLAG_FILE = AGENT_HOME / "remote_enabled"
 APP_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -223,6 +227,7 @@ def _new_app_entry(name: str, command: str, cwd: Optional[str]) -> dict:
         "desired_state": "running",
         "_proc": None,
         "pid": None,
+        "create_time": None,
         "status": "stopped",
         "restart_count": 0,
         "started_at": None,
@@ -251,6 +256,33 @@ def _shell_command(app: dict) -> str:
     return app["command"]
 
 
+def _save_runtime() -> None:
+    """Caller must hold _apps_lock."""
+    data = {a["name"]: {"pid": a.get("pid"), "create_time": a.get("create_time")}
+            for a in _apps.values() if a.get("pid")}
+    try:
+        RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = RUNTIME_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(RUNTIME_FILE)
+    except OSError:
+        pass
+
+
+def _load_runtime() -> dict:
+    try:
+        return json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _create_time(pid: int) -> Optional[float]:
+    try:
+        return psutil.Process(pid).create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+
+
 def _spawn_app(app: dict) -> None:
     """Start (or restart) the process for an app. Caller must hold _apps_lock."""
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -269,8 +301,10 @@ def _spawn_app(app: dict) -> None:
 
     app["_proc"] = proc
     app["pid"] = proc.pid
+    app["create_time"] = _create_time(proc.pid)
     app["status"] = "running"
     app["started_at"] = time.time()
+    _save_runtime()
     log.info(f"App '{app['name']}' started (pid {proc.pid})")
 
 
@@ -316,23 +350,42 @@ def _is_app_alive(app: dict) -> bool:
 
 
 def _stop_app_process(app: dict) -> None:
-    """Best-effort stop. Caller must hold _apps_lock."""
-    proc = app.get("_proc")
+    """Best-effort stop of the app and everything it started. Caller must hold _apps_lock.
+
+    Apps run as `sh -c "cd … && ( command )"`, so the tracked pid is a wrapper
+    shell. Stopping only that shell used to orphan the real program (e.g.
+    cloudflared), and the next start ran a second copy beside it. Each app is
+    started in its own session, so stop the whole tree."""
     pid = app.get("pid")
-    try:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        elif pid and psutil.pid_exists(pid):
-            psutil.Process(pid).terminate()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-        pass
+    procs = []
+    if pid and psutil.pid_exists(pid):
+        try:
+            root = psutil.Process(pid)
+            procs = [root] + root.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            procs = []
+    for p in procs:
+        try:
+            p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=5)
+    for p in alive:
+        try:
+            p.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    proc = app.get("_proc")
+    if proc is not None:
+        try:
+            proc.wait(timeout=1)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     app["_proc"] = None
     app["pid"] = None
+    app["create_time"] = None
     app["status"] = "stopped"
+    _save_runtime()
 
 
 def _app_public(app: dict) -> dict:
@@ -353,6 +406,7 @@ def _load_and_start_apps() -> None:
     """On agent startup: reload persisted apps and re-adopt or (re)start them."""
     with _apps_lock:
         claimed_pids: set[int] = set()
+        runtime = _load_runtime()
         for entry in _load_apps_file():
             name = entry.get("name")
             if not name or not APP_NAME_RE.match(name):
@@ -368,21 +422,41 @@ def _load_and_start_apps() -> None:
             # a reboot. claimed_pids stops two apps from adopting the same
             # process when several share a long command prefix.
             adopted = False
-            for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
-                pid = proc.info["pid"]
-                if pid in claimed_pids:
-                    continue
-                cmdline = " ".join(proc.info.get("cmdline") or [])
-                if _proc_matches_app(app, proc.info.get("cwd"), cmdline):
-                    app["pid"] = pid
-                    app["status"] = "running"
-                    app["started_at"] = time.time()
+            # Exact: the pid we started, if it's still the same process.
+            known = runtime.get(name) or {}
+            kpid, kct = known.get("pid"), known.get("create_time")
+            if kpid and kct and kpid not in claimed_pids:
+                ct = _create_time(kpid)
+                if ct is not None and abs(ct - kct) < 1:
+                    app.update(pid=kpid, create_time=kct, status="running", started_at=time.time())
+                    claimed_pids.add(kpid)
                     adopted = True
-                    claimed_pids.add(pid)
-                    log.info(f"App '{name}' already running (pid {pid}), adopted.")
-                    break
+                    log.info(f"App '{name}' already running (pid {kpid}), adopted.")
+            if not adopted:
+                # Fallback (e.g. the first start after upgrading): prefer a process whose
+                # command line contains the app's exact command; only then match by
+                # folder, and never pick a shell or ssh session that merely sits in it
+                # (home is shared by the tunnel and every ssh login). A wrong pick here
+                # once made the agent start a second Cloudflare tunnel.
+                exact, by_cwd = [], []
+                for proc in psutil.process_iter(["pid", "cmdline", "cwd", "name"]):
+                    pid = proc.info["pid"]
+                    if pid in claimed_pids or pid == os.getpid():
+                        continue
+                    cmdline = " ".join(proc.info.get("cmdline") or [])
+                    if app["command"] and app["command"] in cmdline:
+                        exact.append(pid)
+                    elif (proc.info.get("name") or "").lower() not in SHELL_NAMES                             and _proc_matches_app(app, proc.info.get("cwd"), cmdline):
+                        by_cwd.append(pid)
+                pick = (exact or by_cwd or [None])[0]
+                if pick:
+                    app.update(pid=pick, create_time=_create_time(pick), status="running", started_at=time.time())
+                    claimed_pids.add(pick)
+                    adopted = True
+                    log.info(f"App '{name}' already running (pid {pick}), adopted.")
             if not adopted:
                 _spawn_app(app)
+        _save_runtime()
 
 
 # ── Watchdog ─────────────────────────────────────────────────────────────────────
@@ -444,6 +518,11 @@ def require_auth():
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root():
+    return redirect("/dashboard", code=302)
+
 
 @app.get("/ping")
 def ping():
