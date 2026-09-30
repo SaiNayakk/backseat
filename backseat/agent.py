@@ -277,9 +277,21 @@ def _load_runtime() -> dict:
 
 
 def _create_time(pid: int) -> Optional[float]:
+    """An identifier for this particular process start, so a reused pid isn't mistaken for it.
+
+    psutil needs /proc/stat for this, which Android denies; the process's own
+    /proc/<pid>/stat still has its start time in clock ticks since boot, which
+    serves the same purpose (compared only for equality)."""
     try:
         return psutil.Process(pid).create_time()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+    except psutil.NoSuchProcess:
+        return None
+    except Exception:
+        pass
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        return float(raw[raw.rindex(")") + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
         return None
 
 
