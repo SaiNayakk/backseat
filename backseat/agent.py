@@ -626,6 +626,30 @@ def _battery() -> Optional[dict]:
     return data
 
 
+@app.after_request
+def _public_cors(resp):
+    """CORS for the read-only /public/* endpoints, including preflights.
+
+    Safari/WebKit adds headers to fetches made with `cache: "no-cache"`, which
+    turns them into a preflighted request; Flask answers the OPTIONS itself, so
+    without this the preflight has no Access-Control-Allow-Origin and the browser
+    blocks the real request."""
+    if not request.path.startswith("/public/"):
+        return resp
+    origin = request.headers.get("Origin", "")
+    if origin in VITALS_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers.add("Vary", "Origin")
+        if request.method == "OPTIONS":
+            resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            asked = request.headers.get("Access-Control-Request-Headers", "")
+            allowed = [h.strip() for h in asked.split(",") if h.strip().lower() in ("cache-control", "pragma", "content-type")]
+            if allowed:
+                resp.headers["Access-Control-Allow-Headers"] = ", ".join(allowed)
+            resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
+
+
 @app.get("/public/vitals")
 def public_vitals():
     with _vitals_lock:
@@ -641,10 +665,6 @@ def public_vitals():
             })
         data = _vitals_cache["data"]
     resp = jsonify(data)
-    origin = request.headers.get("Origin", "")
-    if origin in VITALS_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
     resp.headers["Cache-Control"] = "public, max-age=30"
     return resp
 
