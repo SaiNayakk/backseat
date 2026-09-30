@@ -30,5 +30,10 @@ jobs:
           for a in body["apps"]:
               assert set(a) <= {"name", "status", "restart_count", "uptime_seconds"}, a
           assert c.get("/apps").status_code in (401, 403)
+          # Safari preflights: the answer must allow the portfolio's origin.
+          o = {"Origin": "https://saiworks.nncs.in"}
+          pf = c.open("/public/vitals", method="OPTIONS", headers={**o, "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "cache-control"})
+          assert pf.headers.get("Access-Control-Allow-Origin") == o["Origin"], dict(pf.headers)
+          assert c.get("/public/vitals", headers={"Origin": "https://evil.example"}).headers.get("Access-Control-Allow-Origin") is None
           print("ok")
           PY
