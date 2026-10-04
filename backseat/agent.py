@@ -366,27 +366,18 @@ def _stop_app_process(app: dict) -> None:
 
     Apps run as `sh -c "cd … && ( command )"`, so the tracked pid is a wrapper
     shell. Stopping only that shell used to orphan the real program (e.g.
-    cloudflared), and the next start ran a second copy beside it. Each app is
-    started in its own session, so stop the whole tree."""
+    cloudflared), and the next start ran a second copy beside it.
+
+    Each app is started in its own session, so its process group holds
+    everything it started: signal the group (TERM, then KILL after 5 s). Walking
+    the process tree instead needs to read other processes' /proc entries, which
+    Android refuses: psutil raised AccessDenied, the stop gave up on the whole
+    tree, root included, and every restart left the old process running
+    (seen with Sprout's Java hosts on 2026-10-05)."""
     pid = app.get("pid")
-    procs = []
     if pid and psutil.pid_exists(pid):
-        try:
-            root = psutil.Process(pid)
-            procs = [root] + root.children(recursive=True)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            procs = []
-    for p in procs:
-        try:
-            p.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-    _, alive = psutil.wait_procs(procs, timeout=5)
-    for p in alive:
-        try:
-            p.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+        if not _stop_group(pid):
+            _stop_tree(pid)
     proc = app.get("_proc")
     if proc is not None:
         try:
@@ -398,6 +389,52 @@ def _stop_app_process(app: dict) -> None:
     app["create_time"] = None
     app["status"] = "stopped"
     _save_runtime()
+
+
+def _stop_group(pid: int) -> bool:
+    """Stops the process group the app leads. False if it isn't a group leader (or not POSIX)."""
+    if sys.platform == "win32":
+        return False
+    try:
+        if os.getpgid(pid) != pid:
+            return False
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def _stop_tree(pid: int) -> None:
+    """Fallback: the root and whatever of its tree can be seen. Never skips the root."""
+    procs = []
+    try:
+        root = psutil.Process(pid)
+        procs = [root]
+        procs += root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    for p in procs:
+        try:
+            p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=5)
+    for p in alive:
+        try:
+            p.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
 
 def _app_public(app: dict) -> dict:
