@@ -50,6 +50,26 @@ def test_stop_ends_the_whole_process_tree():
     assert not alive, f"left running: {[p.pid for p in alive]}"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_stop_works_when_the_process_tree_cant_be_read(monkeypatch):
+    """Android denies reading other processes' /proc, so psutil's children() fails there."""
+    app = agent._new_app_entry("demo", CHILD, None)
+    agent._apps["demo"] = app
+    with agent._apps_lock:
+        agent._spawn_app(app)
+    time.sleep(1.5)
+    procs = _tree(app["pid"])
+
+    def denied(self, recursive=False):
+        raise psutil.AccessDenied(self.pid)
+
+    monkeypatch.setattr(psutil.Process, "children", denied)
+    with agent._apps_lock:
+        agent._stop_app_process(app)
+    gone, alive = psutil.wait_procs(procs, timeout=5)
+    assert not alive, f"left running: {[p.pid for p in alive]}"
+
+
 def test_restart_adopts_the_exact_process():
     app = agent._new_app_entry("demo", CHILD, None)
     agent._apps["demo"] = app
